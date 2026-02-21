@@ -119,11 +119,29 @@ app.post('/api/benchmarks/calculate', async (req, res) => {
     try {
         const { sector } = req.body;
         
-        // Get all projects in this sector
+        // Get all organizations in this sector
+        const { data: orgs, error: orgError } = await supabase
+            .from('organizations')
+            .select('id')
+            .eq('sector', sector);
+        
+        if (orgError) throw orgError;
+        
+        if (!orgs || orgs.length === 0) {
+            return res.json({ 
+                success: true, 
+                message: 'No organizations found for this sector',
+                count: 0 
+            });
+        }
+        
+        const orgIds = orgs.map(o => o.id);
+        
+        // Get all projects for these organizations
         const { data: projects, error: projectsError } = await supabase
             .from('projects')
-            .select('id, organization_id')
-            .eq('sector', sector);
+            .select('id')
+            .in('organization_id', orgIds);
         
         if (projectsError) throw projectsError;
         
@@ -148,6 +166,7 @@ app.post('/api/benchmarks/calculate', async (req, res) => {
         // Calculate averages
         let avgImpact = 0;
         let avgFinancial = 0;
+        let materialCount = 0;
         
         if (assessments && assessments.length > 0) {
             const validAssessments = assessments.filter(a => 
@@ -157,37 +176,50 @@ app.post('/api/benchmarks/calculate', async (req, res) => {
             if (validAssessments.length > 0) {
                 avgImpact = validAssessments.reduce((sum, a) => sum + a.impact_score, 0) / validAssessments.length;
                 avgFinancial = validAssessments.reduce((sum, a) => sum + a.financial_score, 0) / validAssessments.length;
+                materialCount = validAssessments.filter(a => a.impact_score >= 40 || a.financial_score >= 12).length;
             }
         }
         
-        // Insert/update benchmarks
+        // Delete old benchmarks for this sector
+        await supabase
+            .from('benchmarks')
+            .delete()
+            .eq('sector', sector);
+        
+        // Insert new benchmarks
         const benchmarkData = [
             {
                 sector: sector,
                 metric_name: 'Average Impact Score',
-                metric_value: avgImpact,
+                metric_value: Math.round(avgImpact * 100) / 100,
                 sample_size: projects.length,
-                percentile_25: avgImpact * 0.9,
-                percentile_50: avgImpact,
-                percentile_75: avgImpact * 1.1
+                percentile_25: Math.round(avgImpact * 0.85 * 100) / 100,
+                percentile_50: Math.round(avgImpact * 100) / 100,
+                percentile_75: Math.round(avgImpact * 1.15 * 100) / 100
             },
             {
                 sector: sector,
                 metric_name: 'Average Financial Score',
-                metric_value: avgFinancial,
+                metric_value: Math.round(avgFinancial * 100) / 100,
                 sample_size: projects.length,
-                percentile_25: avgFinancial * 0.9,
-                percentile_50: avgFinancial,
-                percentile_75: avgFinancial * 1.1
+                percentile_25: Math.round(avgFinancial * 0.85 * 100) / 100,
+                percentile_50: Math.round(avgFinancial * 100) / 100,
+                percentile_75: Math.round(avgFinancial * 1.15 * 100) / 100
+            },
+            {
+                sector: sector,
+                metric_name: 'Material Topics Count',
+                metric_value: materialCount / projects.length,
+                sample_size: projects.length,
+                percentile_25: Math.round((materialCount / projects.length) * 0.85),
+                percentile_50: Math.round(materialCount / projects.length),
+                percentile_75: Math.round((materialCount / projects.length) * 1.15)
             }
         ];
         
         const { error: benchError } = await supabase
             .from('benchmarks')
-            .upsert(benchmarkData, { 
-                onConflict: 'sector,metric_name',
-                ignoreDuplicates: false 
-            });
+            .insert(benchmarkData);
         
         if (benchError) throw benchError;
         
@@ -195,7 +227,9 @@ app.post('/api/benchmarks/calculate', async (req, res) => {
             success: true, 
             message: `Benchmarks calculated for ${sector}`,
             metrics: benchmarkData.length,
-            projects: projects.length
+            organizations: orgs.length,
+            projects: projects.length,
+            assessments: assessments ? assessments.length : 0
         });
         
     } catch (error) {
