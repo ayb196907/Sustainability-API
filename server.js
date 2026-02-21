@@ -114,3 +114,92 @@ app.listen(PORT, () => {
 });
 
 module.exports = app;
+// Calculate sector benchmarks
+app.post('/api/benchmarks/calculate', async (req, res) => {
+    try {
+        const { sector } = req.body;
+        
+        // Get all projects in this sector
+        const { data: projects, error: projectsError } = await supabase
+            .from('projects')
+            .select('id, organization_id')
+            .eq('sector', sector);
+        
+        if (projectsError) throw projectsError;
+        
+        if (!projects || projects.length === 0) {
+            return res.json({ 
+                success: true, 
+                message: 'No projects found for this sector',
+                count: 0 
+            });
+        }
+        
+        const projectIds = projects.map(p => p.id);
+        
+        // Get all assessments for these projects
+        const { data: assessments, error: assessError } = await supabase
+            .from('assessments')
+            .select('impact_score, financial_score')
+            .in('project_id', projectIds);
+        
+        if (assessError) throw assessError;
+        
+        // Calculate averages
+        let avgImpact = 0;
+        let avgFinancial = 0;
+        
+        if (assessments && assessments.length > 0) {
+            const validAssessments = assessments.filter(a => 
+                a.impact_score != null && a.financial_score != null
+            );
+            
+            if (validAssessments.length > 0) {
+                avgImpact = validAssessments.reduce((sum, a) => sum + a.impact_score, 0) / validAssessments.length;
+                avgFinancial = validAssessments.reduce((sum, a) => sum + a.financial_score, 0) / validAssessments.length;
+            }
+        }
+        
+        // Insert/update benchmarks
+        const benchmarkData = [
+            {
+                sector: sector,
+                metric_name: 'Average Impact Score',
+                metric_value: avgImpact,
+                sample_size: projects.length,
+                percentile_25: avgImpact * 0.9,
+                percentile_50: avgImpact,
+                percentile_75: avgImpact * 1.1
+            },
+            {
+                sector: sector,
+                metric_name: 'Average Financial Score',
+                metric_value: avgFinancial,
+                sample_size: projects.length,
+                percentile_25: avgFinancial * 0.9,
+                percentile_50: avgFinancial,
+                percentile_75: avgFinancial * 1.1
+            }
+        ];
+        
+        const { error: benchError } = await supabase
+            .from('benchmarks')
+            .upsert(benchmarkData, { 
+                onConflict: 'sector,metric_name',
+                ignoreDuplicates: false 
+            });
+        
+        if (benchError) throw benchError;
+        
+        res.json({ 
+            success: true, 
+            message: `Benchmarks calculated for ${sector}`,
+            metrics: benchmarkData.length,
+            projects: projects.length
+        });
+        
+    } catch (error) {
+        console.error('Benchmark calculation error:', error);
+        res.status(400).json({ success: false, error: error.message });
+    }
+});
